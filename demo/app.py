@@ -4,7 +4,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import yfinance as yf
 from fredapi import Fred
+import time
 from google import genai
+from google.genai.errors import APIError
 
 # 頁面基本配置
 st.set_page_config(page_title="總體經濟與金融即時儀表板", layout="wide")
@@ -31,20 +33,22 @@ if st.sidebar.button("手動刷新數據"):
     st.cache_data.clear()
     st.rerun()
 
-# 抓取 FRED 數據 (快取 1 小時)
+# 1. 抓取 FRED 數據 (快取 1 小時)
 @st.cache_data(ttl=3600)
 def get_fred_data(api_key):
     fred = Fred(api_key=api_key)
     
+    # 抓取各項指標
     cpi = fred.get_series("CPIAUCSL")
     dgs10 = fred.get_series("DGS10")
-    dgs2 = fred.get_series("DGS2")
+    dgs2 = fred.get_series("DGS2")               # 2 年期美債殖利率
     unrate = fred.get_series("UNRATE")
     fedfunds = fred.get_series("FEDFUNDS")
-    jgb10 = fred.get_series("IRLTLT01JPM156N")
+    jgb10 = fred.get_series("IRLTLT01JPM156N")    # 日本 10 年期公債殖利率 (月度)
     
+    # 計算指標
     cpi_yoy = cpi.pct_change(12) * 100
-    yield_spread = dgs10 - dgs2
+    yield_spread = dgs10 - dgs2                  # 計算 10Y-2Y 美債利差
     
     series_dict = {
         "CPI 物價指數": cpi,
@@ -57,11 +61,12 @@ def get_fred_data(api_key):
         "聯邦基金利率 (%)": fedfunds
     }
     
+    # 合併時間序列並填補日與月資料的頻率差
     df = pd.DataFrame(series_dict).sort_index()
     df = df.ffill().dropna(how="all").tail(730)
     return df
 
-# 抓取 Market 數據 (快取 10 分鐘)
+# 2. 抓取 Market 數據 (快取 10 分鐘)
 @st.cache_data(ttl=600)
 def get_market_data():
     tickers = {
@@ -81,25 +86,27 @@ def get_market_data():
     df.rename(columns={v: k for k, v in tickers.items()}, inplace=True)
     return df.dropna(how="all")
 
-# 調用 google-genai 產生評論
-
+# 3. 調用 google-genai 產生評論 (包含 503 重試與備用模型容錯)
 def generate_macro_summary(api_key, cpi_val, unemp_val, fed_val, spread_val, gold_val):
     client = genai.Client(api_key=api_key)
     prompt = f"""
-你是一位專業總體經濟與金融市場分析師。請根據以下最新公布之核心指標數據，產出一份約 200 字以內的精練總體經濟短評：
+你是一位專業總體經濟與金融市場分析師。請根據以下最新公布之核心指標數據，產出一份約 200 字以內的精練總體經濟短評，重點剖析當前通膨壓力、聯準會貨幣政策路徑，以及市場衰退風險（利差信號）：
+
+【最新指標數據】
 - 美國 CPI 年增率：{cpi_val:.2f}%
 - 美國失業率：{unemp_val:.1f}%
 - 美國聯邦基金利率：{fed_val:.2f}%
-- 10Y-2Y 美債利差：{spread_val:.2f}%
+- 10Y-2Y 美債殖利率利差：{spread_val:.2f}%（{'殖利率倒掛中' if spread_val < 0 else '利差正常'}）
 - 黃金現貨價格：${gold_val:.1f} 美元/盎司
-請以繁體中文撰寫，言簡意賅。
+
+請以繁體中文撰寫，言簡意賅、切中要點。
 """
-    # 準備主模型與備用模型
+    # 遇到 503 時自動輪替嘗試備用模型
     models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-1.5-flash"]
+    last_error = None
     
-    last_err = None
     for model_name in models_to_try:
-        for attempt in range(2):  # 每個模型嘗試最多 2 次
+        for attempt in range(2):
             try:
                 response = client.models.generate_content(
                     model=model_name,
@@ -107,17 +114,17 @@ def generate_macro_summary(api_key, cpi_val, unemp_val, fed_val, spread_val, gol
                 )
                 return response.text
             except APIError as e:
-                last_err = e
+                last_error = e
                 if e.code == 503:
-                    time.sleep(2 * (attempt + 1))  # 遇到 503 等待 2s / 4s 後重試
+                    time.sleep(2 * (attempt + 1))  # 遇到 503 短暫延遲後重試
                     continue
                 raise e
             except Exception as e:
-                last_err = e
+                last_error = e
                 time.sleep(1)
                 continue
                 
-    raise last_err
+    raise last_error
 
 # 頁面主體渲染
 if fred_key:
@@ -125,11 +132,11 @@ if fred_key:
         macro_df = get_fred_data(fred_key)
         market_df = get_market_data()
 
-        # 第一區塊：核心 KPI 卡片
+        # 第一區塊：核心 KPI 卡片 (5 欄)
         st.subheader("📊 關鍵總體經濟與資產價格概覽")
         col1, col2, col3, col4, col5 = st.columns(5)
         
-        # 1. CPI
+        # 1. CPI 年增率
         cpi_series = macro_df["CPI 年增率 (%)"].dropna()
         latest_cpi = cpi_series.iloc[-1] if not cpi_series.empty else 0.0
         if len(cpi_series) >= 2:
@@ -140,7 +147,7 @@ if fred_key:
         if len(us10_series) >= 2:
             col2.metric("美債 10年期", f"{us10_series.iloc[-1]:.2f}%", f"{us10_series.iloc[-1] - us10_series.iloc[-2]:+.2f}%")
         
-        # 3. 失業率
+        # 3. 美國失業率
         unemp_series = macro_df["美國失業率 (%)"].dropna()
         latest_unemp = unemp_series.iloc[-1] if not unemp_series.empty else 0.0
         if len(unemp_series) >= 2:
@@ -152,7 +159,7 @@ if fred_key:
         if len(spread_series) >= 2:
             col4.metric("10Y-2Y 利差", f"{latest_spread:.2f}%", f"{latest_spread - spread_series.iloc[-2]:+.2f}%")
 
-        # 5. 黃金報價
+        # 5. 黃金現貨報價
         gold_series = market_df["黃金期貨/現貨 (USD/oz)"].dropna() if "黃金期貨/現貨 (USD/oz)" in market_df.columns else pd.Series(dtype=float)
         latest_gold = gold_series.iloc[-1] if not gold_series.empty else 0.0
         if len(gold_series) >= 2:
@@ -161,36 +168,64 @@ if fred_key:
         fed_series = macro_df["聯邦基金利率 (%)"].dropna()
         latest_fed = fed_series.iloc[-1] if not fed_series.empty else 0.0
 
-        # 倒掛警示區塊
+        # 核心警示區塊
         st.write("---")
         if not spread_series.empty:
             if latest_spread < 0:
-                st.error(f"⚠️ **殖利率曲線倒掛警示**｜目前 10Y-2Y 利差為 **{latest_spread:.2f}%**，歷史上常視為經濟衰退的領先信號。")
+                st.error(
+                    f"⚠️ **殖利率曲線倒掛警示（Inverted Yield Curve）**｜目前 10Y-2Y 利差為 **{latest_spread:.2f}%**（小於 0%）。"
+                    "歷史上長短期殖利率倒掛常被視為經濟衰退的先行訊號，請留意市場波動風險！"
+                )
             else:
-                st.success(f"✅ **殖利率曲線正常**｜目前 10Y-2Y 利差為 **{latest_spread:.2f}%**，未處於倒掛狀態。")
+                st.success(
+                    f"✅ **殖利率曲線正常（Normal Yield Curve）**｜目前 10Y-2Y 利差為 **{latest_spread:.2f}%**（大於等於 0%），未處於倒掛狀態。"
+                )
 
-        # 第二區塊：互動式圖表
-        st.subheader("📈 走勢圖表")
-        tab1, tab2 = st.tabs(["📉 美債 10Y-2Y 利差走勢", "📈 市場與總經走勢"])
+        # 第二區塊：圖表分頁
+        st.subheader("📈 市場走勢與總體指標折線圖")
+        tab1, tab2, tab3 = st.tabs([
+            "📉 美債 10Y-2Y 利差走勢", 
+            "📈 金融市場走勢 (yfinance)", 
+            "🏛️ 總體經濟與公債趨勢 (FRED)"
+        ])
         
         with tab1:
+            st.markdown("#### 10 年期減 2 年期美債殖利率利差歷史走勢")
             fig_spread = go.Figure()
             fig_spread.add_trace(go.Scatter(
                 x=spread_series.index, y=spread_series.values,
                 mode="lines", name="10Y - 2Y 利差", line=dict(color="#1f77b4", width=2)
             ))
-            fig_spread.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="0% 門檻")
-            fig_spread.update_layout(hovermode="x unified", xaxis_title="日期", yaxis_title="利差 (%)", height=400)
+            fig_spread.add_hline(
+                y=0, line_dash="dash", line_color="red", 
+                annotation_text="倒掛門檻 (0%)", annotation_position="bottom right"
+            )
+            fig_spread.update_layout(
+                hovermode="x unified", xaxis_title="日期", yaxis_title="利差百分比 (%)", 
+                height=420, margin=dict(l=20, r=20, t=30, b=20)
+            )
             st.plotly_chart(fig_spread, use_container_width=True)
-            
-        with tab2:
-            choice = st.selectbox("選擇指標：", list(market_df.columns) + list(macro_df.columns))
-            plot_series = market_df[choice] if choice in market_df.columns else macro_df[choice]
-            fig = px.line(plot_series.dropna(), title=f"{choice} 近期趨勢", labels={"index": "日期", "value": choice})
-            fig.update_layout(hovermode="x unified")
-            st.plotly_chart(fig, use_container_width=True)
 
-        # 第三區塊：AI 總體經濟短評按鈕
+        with tab2:
+            market_choice = st.selectbox("選擇金融市場標的：", market_df.columns)
+            fig_market = px.line(
+                market_df, y=market_choice, title=f"{market_choice} 近一年走勢",
+                labels={"index": "日期", market_choice: "價格 / 點數"}
+            )
+            fig_market.update_layout(hovermode="x unified")
+            st.plotly_chart(fig_market, use_container_width=True)
+            
+        with tab3:
+            macro_choice = st.selectbox("選擇總體經濟指標：", macro_df.columns)
+            clean_macro = macro_df[macro_choice].dropna()
+            fig_macro = px.line(
+                clean_macro, title=f"{macro_choice} 近年趨勢",
+                labels={"index": "日期", "value": macro_choice}
+            )
+            fig_macro.update_layout(hovermode="x unified", showlegend=False)
+            st.plotly_chart(fig_macro, use_container_width=True)
+
+        # 第三區塊：AI 總經短評
         st.write("---")
         st.subheader("🤖 AI 總體經濟即時解讀")
         
