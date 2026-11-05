@@ -82,25 +82,42 @@ def get_market_data():
     return df.dropna(how="all")
 
 # 調用 google-genai 產生評論
+
 def generate_macro_summary(api_key, cpi_val, unemp_val, fed_val, spread_val, gold_val):
     client = genai.Client(api_key=api_key)
     prompt = f"""
-你是一位專業總體經濟與金融市場分析師。請根據以下最新公布之核心指標數據，產出一份約 200 字以內的精練總體經濟短評，重點剖析當前通膨壓力、聯準會貨幣政策路徑，以及市場衰退風險（利差信號）：
-
-【最新指標數據】
+你是一位專業總體經濟與金融市場分析師。請根據以下最新公布之核心指標數據，產出一份約 200 字以內的精練總體經濟短評：
 - 美國 CPI 年增率：{cpi_val:.2f}%
 - 美國失業率：{unemp_val:.1f}%
 - 美國聯邦基金利率：{fed_val:.2f}%
-- 10Y-2Y 美債殖利率利差：{spread_val:.2f}%（{'殖利率倒掛中' if spread_val < 0 else '利差正常'}）
+- 10Y-2Y 美債利差：{spread_val:.2f}%
 - 黃金現貨價格：${gold_val:.1f} 美元/盎司
-
-請以繁體中文撰寫，言簡意賅、切中要點。
+請以繁體中文撰寫，言簡意賅。
 """
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt
-    )
-    return response.text
+    # 準備主模型與備用模型
+    models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-1.5-flash"]
+    
+    last_err = None
+    for model_name in models_to_try:
+        for attempt in range(2):  # 每個模型嘗試最多 2 次
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+                return response.text
+            except APIError as e:
+                last_err = e
+                if e.code == 503:
+                    time.sleep(2 * (attempt + 1))  # 遇到 503 等待 2s / 4s 後重試
+                    continue
+                raise e
+            except Exception as e:
+                last_err = e
+                time.sleep(1)
+                continue
+                
+    raise last_err
 
 # 頁面主體渲染
 if fred_key:
