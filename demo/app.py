@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import yfinance as yf
 from fredapi import Fred
 
@@ -11,7 +12,6 @@ st.title("🌐 全球總體經濟與金融指標即時儀表板")
 # 側邊欄：輸入 API Key 與刷新控制
 st.sidebar.header("⚙️ 設定與金鑰")
 
-# 優先使用 Streamlit Secrets，若無則讓使用者在側邊欄手動輸入
 if "FRED_API_KEY" in st.secrets:
     fred_key = st.secrets["FRED_API_KEY"]
     st.sidebar.success("已自動讀取 Secrets 中的 API Key！")
@@ -30,17 +30,21 @@ def get_fred_data(api_key):
     # 抓取指標數據
     cpi = fred.get_series("CPIAUCSL")
     dgs10 = fred.get_series("DGS10")
+    dgs2 = fred.get_series("DGS2")               # 新增：2 年期美債殖利率
     unrate = fred.get_series("UNRATE")
     fedfunds = fred.get_series("FEDFUNDS")
-    jgb10 = fred.get_series("IRLTLT01JPM156N")  # 日本 10 年期政府公債殖利率 (月度)
+    jgb10 = fred.get_series("IRLTLT01JPM156N")    # 日本 10 年期公債殖利率
     
-    # 計算 CPI 年增率 (YoY Inflation Rate)
+    # 計算指標
     cpi_yoy = cpi.pct_change(12) * 100
+    yield_spread = dgs10 - dgs2                  # 計算 10Y-2Y 美債利差
     
     series_dict = {
         "CPI 物價指數": cpi,
         "CPI 年增率 (%)": cpi_yoy,
         "美國10年期美債殖利率 (%)": dgs10,
+        "美國2年期美債殖利率 (%)": dgs2,
+        "10Y-2Y美債利差 (%)": yield_spread,
         "日本10年期國債殖利率 (%)": jgb10,
         "美國失業率 (%)": unrate,
         "聯邦基金利率 (%)": fedfunds
@@ -64,7 +68,6 @@ def get_market_data():
     }
     raw_df = yf.download(list(tickers.values()), period="1y", progress=False)
     
-    # 確保抓取 Close 欄位並重命名
     if "Close" in raw_df.columns:
         df = raw_df["Close"].copy()
     else:
@@ -88,44 +91,28 @@ if fred_key:
         if len(cpi_series) >= 2:
             latest_cpi_yoy = cpi_series.iloc[-1]
             prev_cpi_yoy = cpi_series.iloc[-2]
-            col1.metric(
-                "CPI 年增率", 
-                f"{latest_cpi_yoy:.2f}%", 
-                f"{latest_cpi_yoy - prev_cpi_yoy:+.2f}% MoM"
-            )
+            col1.metric("CPI 年增率", f"{latest_cpi_yoy:.2f}%", f"{latest_cpi_yoy - prev_cpi_yoy:+.2f}% MoM")
         
         # 2. 美國 10 年期美債殖利率
         us_bond_series = macro_df["美國10年期美債殖利率 (%)"].dropna()
         if len(us_bond_series) >= 2:
             latest_us_bond = us_bond_series.iloc[-1]
             prev_us_bond = us_bond_series.iloc[-2]
-            col2.metric(
-                "美國10年公債", 
-                f"{latest_us_bond:.2f}%", 
-                f"{latest_us_bond - prev_us_bond:+.2f}%"
-            )
+            col2.metric("美債 10年期", f"{latest_us_bond:.2f}%", f"{latest_us_bond - prev_us_bond:+.2f}%")
         
-        # 3. 日本 10 年期國債殖利率
-        jp_bond_series = macro_df["日本10年期國債殖利率 (%)"].dropna()
-        if len(jp_bond_series) >= 2:
-            latest_jp_bond = jp_bond_series.iloc[-1]
-            prev_jp_bond = jp_bond_series.iloc[-2]
-            col3.metric(
-                "日本10年公債", 
-                f"{latest_jp_bond:.2f}%", 
-                f"{latest_jp_bond - prev_jp_bond:+.2f}%"
-            )
+        # 3. 美國 2 年期美債殖利率
+        us2_series = macro_df["美國2年期美債殖利率 (%)"].dropna()
+        if len(us2_series) >= 2:
+            latest_us2 = us2_series.iloc[-1]
+            prev_us2 = us2_series.iloc[-2]
+            col3.metric("美債 2年期", f"{latest_us2:.2f}%", f"{latest_us2 - prev_us2:+.2f}%")
         
-        # 4. 聯邦基金利率
-        fed_series = macro_df["聯邦基金利率 (%)"].dropna()
-        if len(fed_series) >= 2:
-            latest_fed = fed_series.iloc[-1]
-            prev_fed = fed_series.iloc[-2]
-            col4.metric(
-                "聯邦基金利率", 
-                f"{latest_fed:.2f}%", 
-                f"{latest_fed - prev_fed:+.2f}%"
-            )
+        # 4. 10Y - 2Y 美債利差
+        spread_series = macro_df["10Y-2Y美債利差 (%)"].dropna()
+        if len(spread_series) >= 2:
+            latest_spread = spread_series.iloc[-1]
+            prev_spread = spread_series.iloc[-2]
+            col4.metric("10Y-2Y 利差", f"{latest_spread:.2f}%", f"{latest_spread - prev_spread:+.2f}%")
 
         # 5. 黃金最新報價
         if "黃金期貨/現貨 (USD/oz)" in market_df.columns:
@@ -133,40 +120,89 @@ if fred_key:
             if len(gold_series) >= 2:
                 latest_gold = gold_series.iloc[-1]
                 prev_gold = gold_series.iloc[-2]
-                col5.metric(
-                    "黃金價格 (oz)", 
-                    f"${latest_gold:.1f}", 
-                    f"{latest_gold - prev_gold:+.1f} USD"
+                col5.metric("黃金價格 (oz)", f"${latest_gold:.1f}", f"{latest_gold - prev_gold:+.1f} USD")
+
+        # 核心亮點：殖利率曲線警示區塊
+        st.write("---")
+        spread_clean = macro_df["10Y-2Y美債利差 (%)"].dropna()
+        
+        if not spread_clean.empty:
+            curr_spread = spread_clean.iloc[-1]
+            
+            # 若利差小於 0 顯示紅色警告，否則顯示綠色安全提示
+            if curr_spread < 0:
+                st.error(
+                    f"⚠️ **殖利率曲線倒掛警示（Inverted Yield Curve）**｜目前 10Y-2Y 利差為 **{curr_spread:.2f}%**（小於 0%）。"
+                    "歷史上長短期殖利率倒掛常被視為經濟衰退的先行訊號，請留意市場波動風險！"
+                )
+            else:
+                st.success(
+                    f"✅ **殖利率曲線正常（Normal Yield Curve）**｜目前 10Y-2Y 利差為 **{curr_spread:.2f}%**（大於等於 0%），未處於倒掛狀態。"
                 )
 
         # 第二區塊：互動式圖表
-        st.write("---")
         st.subheader("📈 市場走勢與總體指標折線圖")
         
-        tab1, tab2 = st.tabs(["金融市場走勢 (yfinance)", "總體經濟與公債走勢 (FRED)"])
+        tab1, tab2, tab3 = st.tabs([
+            "📉 美債 10Y-2Y 利差專題", 
+            "📈 金融市場走勢 (yfinance)", 
+            "🏛️ 總體經濟與公債趨勢 (FRED)"
+        ])
         
+        # Tab 1：專題利差折線圖（含基準 0 線與填色警示）
         with tab1:
+            st.markdown("#### 10 年期減 2 年期美債殖利率利差歷史走勢")
+            
+            fig_spread = go.Figure()
+            
+            # 利差線
+            fig_spread.add_trace(go.Scatter(
+                x=spread_clean.index,
+                y=spread_clean.values,
+                mode="lines",
+                name="10Y - 2Y 利差",
+                line=dict(color="#1f77b4", width=2)
+            ))
+            
+            # 零軸基準線 (Dash Line)
+            fig_spread.add_hline(
+                y=0, 
+                line_dash="dash", 
+                line_color="red", 
+                annotation_text="倒掛門檻 (0%)", 
+                annotation_position="bottom right"
+            )
+            
+            fig_spread.update_layout(
+                hovermode="x unified",
+                xaxis_title="日期",
+                yaxis_title="利差百分比 (%)",
+                height=450,
+                margin=dict(l=20, r=20, t=30, b=20)
+            )
+            st.plotly_chart(fig_spread, use_container_width=True)
+
+        with tab2:
             market_choice = st.selectbox("選擇金融市場標的：", market_df.columns)
-            fig1 = px.line(
+            fig_market = px.line(
                 market_df, 
                 y=market_choice, 
                 title=f"{market_choice} 近一年走勢",
                 labels={"index": "日期", market_choice: "價格 / 點數"}
             )
-            fig1.update_layout(hovermode="x unified")
-            st.plotly_chart(fig1, use_container_width=True)
+            fig_market.update_layout(hovermode="x unified")
+            st.plotly_chart(fig_market, use_container_width=True)
             
-        with tab2:
-            macro_choice = st.selectbox("選擇總體經濟與公債指標：", macro_df.columns)
-            # 取非空值繪圖，避免月度數據在折線圖上出現階梯斷層
+        with tab3:
+            macro_choice = st.selectbox("選擇總體經濟指標：", macro_df.columns)
             clean_macro = macro_df[macro_choice].dropna()
-            fig2 = px.line(
+            fig_macro = px.line(
                 clean_macro, 
                 title=f"{macro_choice} 近年趨勢",
                 labels={"index": "日期", "value": macro_choice}
             )
-            fig2.update_layout(hovermode="x unified", showlegend=False)
-            st.plotly_chart(fig2, use_container_width=True)
+            fig_macro.update_layout(hovermode="x unified", showlegend=False)
+            st.plotly_chart(fig_macro, use_container_width=True)
 
     except Exception as e:
         st.error(f"數據讀取失敗，請確認 FRED API Key 是否正確。錯誤訊息: {e}")
