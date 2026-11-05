@@ -97,7 +97,7 @@ def generate_macro_summary(api_key, cpi_val, unemp_val, fed_val, spread_val, gol
 請以繁體中文撰寫，言簡意賅、切中要點。
 """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         contents=prompt
     )
     return response.text
