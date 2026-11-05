@@ -86,7 +86,7 @@ def get_market_data():
     df.rename(columns={v: k for k, v in tickers.items()}, inplace=True)
     return df.dropna(how="all")
 
-# 3. 調用 google-genai 產生評論 (包含 503 重試與備用模型容錯)
+# 3. 調用 google-genai 產生評論 (使用推薦的 gemini-3.8-flash 與容錯重試)
 def generate_macro_summary(api_key, cpi_val, unemp_val, fed_val, spread_val, gold_val):
     client = genai.Client(api_key=api_key)
     prompt = f"""
@@ -101,8 +101,8 @@ def generate_macro_summary(api_key, cpi_val, unemp_val, fed_val, spread_val, gol
 
 請以繁體中文撰寫，言簡意賅、切中要點。
 """
-    # 遇到 503 時自動輪替嘗試備用模型
-    models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-1.5-flash"]
+    # 更新為官方推薦的最新模型列表
+    models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-3-flash"]
     last_error = None
     
     for model_name in models_to_try:
@@ -115,8 +115,12 @@ def generate_macro_summary(api_key, cpi_val, unemp_val, fed_val, spread_val, gol
                 return response.text
             except APIError as e:
                 last_error = e
+                # 404 表示該型號名稱不適用，跳過並換下一個模型
+                if e.code == 404:
+                    break
+                # 503 伺服器尖峰過載時稍候重試
                 if e.code == 503:
-                    time.sleep(2 * (attempt + 1))  # 遇到 503 短暫延遲後重試
+                    time.sleep(2 * (attempt + 1))
                     continue
                 raise e
             except Exception as e:
