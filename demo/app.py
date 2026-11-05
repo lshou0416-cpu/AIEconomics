@@ -204,3 +204,8 @@ if fred_key:
         st.error(f"數據讀取失敗，請確認 FRED API Key 是否正確。錯誤訊息: {e}")
 else:
     st.info("👈 請在左側輸入您的 FRED API Key 以開啟儀表板。")
+
+    except Exception as e:
+        st.error(f"數據讀取失敗，請確認 FRED API Key 是否正確。錯誤訊息: {e}")
+else:
+    st.info("👈 請在左側輸入您的 FRED API Key 以開啟儀表板。")
