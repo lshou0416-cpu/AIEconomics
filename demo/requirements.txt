@@ -4,4 +4,6 @@ plotly
 yfinance
 fredapi
 feedparser
-google-generativeai
+requests
+google-genai
+pydantic
