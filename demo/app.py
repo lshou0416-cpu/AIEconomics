@@ -40,6 +40,7 @@ if st.sidebar.button("🔄 手動刷新所有數據"):
     st.cache_data.clear()
     st.session_state.pop("macro_summary", None)
     st.session_state.pop("news_analysis_data", None)
+    st.session_state.pop("chat_history", None)
     st.rerun()
 
 
@@ -184,7 +185,6 @@ def call_gemini_with_retry(api_key, prompt, response_schema=None):
                 time.sleep(1)
                 continue
 
-    # 最後備援：直接從你的 API Key 可用模型清單中抓支援的 flash 模型
     try:
         available_models = [
             m.name for m in client.models.list()
@@ -250,8 +250,24 @@ def analyze_news_sentiment_structured(api_key, news_items):
     return parsed
 
 
+def chat_with_macro_assistant(api_key, chat_history, user_question, market_context_str):
+    recent_msgs = chat_history[-8:]
+    history_text = "\n".join(
+        [f"{'使用者' if m['role'] == 'user' else 'AI 分析師'}：{m['content']}" for m in recent_msgs]
+    )
+    prompt = (
+        "你是一位專精於全球總體經濟、美債殖利率、外匯、大宗商品與台美股市的資深金融分析師。"
+        "請根據以下儀表板即時抓取的最新市場數據，以專業、客觀且易懂的繁體中文回答使用者的問題。\n"
+        "注意：請適度引用下方數據佐證你的觀點，但不要給出保證獲利的投資建議。\n\n"
+        f"【儀表板即時數據快照】\n{market_context_str}\n\n"
+        f"【近期對話紀錄】\n{history_text}\n\n"
+        f"【使用者最新問題】\n{user_question}"
+    )
+    return call_gemini_with_retry(api_key, prompt)
+
+
 # ==========================================
-# 5. NLP 視覺化圖表繪製輔助函式
+# 5. 視覺化圖表繪製輔助函式
 # ==========================================
 def render_sentiment_gauge(score):
     if score >= 60:
@@ -335,6 +351,25 @@ def render_news_score_bar(df_items):
     return fig
 
 
+def render_correlation_heatmap(corr_matrix, title_text):
+    fig = px.imshow(
+        corr_matrix,
+        text_auto=".2f",
+        aspect="auto",
+        color_continuous_scale="RdBu_r",
+        zmin=-1.0,
+        zmax=1.0,
+        title=title_text,
+    )
+    fig.update_layout(
+        height=560,
+        margin=dict(l=20, r=20, t=55, b=20),
+        xaxis_title="",
+        yaxis_title="",
+    )
+    return fig
+
+
 # ==========================================
 # 6. 儀表板主畫面渲染函式
 # ==========================================
@@ -349,8 +384,9 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
         col1.metric("CPI 年增率", f"{latest_cpi:.2f}%", f"{latest_cpi - cpi_series.iloc[-2]:+.2f}% MoM")
 
     us10_series = raw_series["美國10年期美債殖利率 (%)"]
+    latest_us10 = us10_series.iloc[-1] if not us10_series.empty else 0.0
     if len(us10_series) >= 2:
-        col2.metric("美債 10年期", f"{us10_series.iloc[-1]:.2f}%", f"{us10_series.iloc[-1] - us10_series.iloc[-2]:+.2f}%")
+        col2.metric("美債 10年期", f"{latest_us10:.2f}%", f"{latest_us10 - us10_series.iloc[-2]:+.2f}%")
 
     unemp_series = raw_series["美國失業率 (%)"]
     latest_unemp = unemp_series.iloc[-1] if not unemp_series.empty else 0.0
@@ -387,13 +423,15 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
                 f"✅ **殖利率曲線正常（Normal Yield Curve）**｜目前 10Y-2Y 利差為 **{latest_spread:.2f}%**（大於等於 0%），未處於倒掛狀態。"
             )
 
-    # 第二區塊：多功能分頁儀表板 (4 個分頁)
-    st.subheader("📈 市場走勢、總經指標與 AI 輿論分析")
-    tab1, tab2, tab3, tab4 = st.tabs([
+    # 第二區塊：多功能分頁儀表板 (6 個分頁)
+    st.subheader("📈 市場走勢、總經指標、相關性分析與 AI 互動")
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📉 美債 10Y-2Y 利差走勢",
         "📈 金融市場走勢 (yfinance)",
         "🏛️ 總體經濟與公債趨勢 (FRED)",
         "📰 NLP 市場新聞與鷹鴿情緒分析",
+        "🔥 跨資產與總經相關係數熱力圖",
+        "💬 AI 總經分析師聊天機器人",
     ])
 
     with tab1:
@@ -446,7 +484,7 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
         st.plotly_chart(fig_macro, use_container_width=True)
 
     # ==========================================
-    # Tab 4：升級版 NLP 視覺化與互動介面
+    # Tab 4：NLP 視覺化與互動介面
     # ==========================================
     with tab4:
         st.markdown("#### 📰 即時財經新聞與 LLM 鷹鴿派情緒分析")
@@ -593,6 +631,173 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
                     st.markdown(f"**{i}.** [{item['title']}]({item['link']}){pub_str}")
             else:
                 st.warning("查無相關新聞標題，請嘗試更換關鍵字。")
+
+    # ==========================================
+    # Tab 5：跨資產與總經相關係數熱力圖
+    # ==========================================
+    with tab5:
+        st.markdown("#### 🔥 跨資產價格與總體經濟指標相關係數矩陣 (Correlation Heatmap)")
+        st.caption("觀察不同金融資產（股市、黃金、原油、匯率）與美債殖利率、總經指標之間的連動性（+1 為完全正相關，-1 為完全負相關）。")
+
+        # 對齊索引合併金融市場與總經數據
+        m_df = market_df.copy()
+        f_df = macro_df.copy()
+        m_df.index = pd.to_datetime(m_df.index).tz_localize(None).normalize()
+        f_df.index = pd.to_datetime(f_df.index).tz_localize(None).normalize()
+
+        combined_df = m_df.join(f_df, how="inner").ffill().dropna(axis=1, how="all")
+
+        hm_col1, hm_col2, hm_col3 = st.columns([1, 1.2, 1.5])
+        with hm_col1:
+            lookback_label = st.selectbox(
+                "📅 觀察時間區間：",
+                options=["近 60 個交易日 (約3個月)", "近 120 個交易日 (約6個月)", "近 250 個交易日 (約1年)"],
+                index=2,
+            )
+            lookback_days = {"近 60 個交易日 (約3個月)": 60, "近 120 個交易日 (約6個月)": 120, "近 250 個交易日 (約1年)": 250}[lookback_label]
+
+        with hm_col2:
+            corr_mode = st.radio(
+                "📐 計算基礎：",
+                options=["原始數值水準 (Level)", "每日變動 / 報酬率 (Daily Change)"],
+                horizontal=False,
+            )
+
+        with hm_col3:
+            default_cols = [c for c in [
+                "S&P 500", "台灣加權指數", "黃金期貨/現貨 (USD/oz)",
+                "布蘭特原油", "美元/台幣匯率", "美國10年期美債殖利率 (%)", "10Y-2Y美債利差 (%)"
+            ] if c in combined_df.columns]
+            selected_vars = st.multiselect(
+                "🎯 自訂納入計算的指標：",
+                options=list(combined_df.columns),
+                default=default_cols,
+            )
+
+        if len(selected_vars) >= 2:
+            sub_df = combined_df[selected_vars].tail(lookback_days).dropna()
+            if corr_mode == "每日變動 / 報酬率 (Daily Change)":
+                # 價格類取 pct_change，利率/百分比類取 diff
+                calc_df = pd.DataFrame(index=sub_df.index)
+                for c in sub_df.columns:
+                    if "%" in c:
+                        calc_df[c] = sub_df[c].diff()
+                    else:
+                        calc_df[c] = sub_df[c].pct_change()
+                calc_df = calc_df.dropna()
+            else:
+                calc_df = sub_df
+
+            if len(calc_df) >= 5:
+                corr_mat = calc_df.corr()
+                st.plotly_chart(
+                    render_correlation_heatmap(corr_mat, f"相關係數矩陣（{lookback_label}｜{corr_mode}）"),
+                    use_container_width=True,
+                )
+
+                # 自動找出最強正相關與最強負相關組合
+                corr_pairs = (
+                    corr_mat.where(~pd.DataFrame(
+                        [[i >= j for j in range(len(corr_mat))] for i in range(len(corr_mat))],
+                        index=corr_mat.index,
+                        columns=corr_mat.columns,
+                    ))
+                    .stack()
+                    .dropna()
+                )
+                if not corr_pairs.empty:
+                    max_pair = corr_pairs.idxmax()
+                    max_val = corr_pairs.max()
+                    min_pair = corr_pairs.idxmin()
+                    min_val = corr_pairs.min()
+
+                    ins_col1, ins_col2 = st.columns(2)
+                    ins_col1.info(f"📈 **最強正相關組合：** `{max_pair[0]}` 與 `{max_pair[1]}`（相關係數：**{max_val:+.2f}**）")
+                    ins_col2.warning(f"📉 **最強負相關組合：** `{min_pair[0]}` 與 `{min_pair[1]}`（相關係數：**{min_val:+.2f}**）")
+            else:
+                st.warning("選定區間內的有效重疊樣本數不足，請放寬時間區間或調整指標。")
+        else:
+            st.info("請至少選擇 2 項指標以繪製相關係數熱力圖。")
+
+    # ==========================================
+    # Tab 6：AI 總經分析師聊天機器人
+    # ==========================================
+    with tab6:
+        st.markdown("#### 💬 AI 總經與金融市場分析師聊天機器人")
+        st.caption("已自動同步當前儀表板的最新 FRED 總經數據與 Yahoo Finance 市場行情，可直接針對現況提問。")
+
+        if not gemini_api_key:
+            st.warning("👈 請先在側邊欄輸入 Gemini API Key 以啟用 AI 聊天機器人。")
+        else:
+            # 組合即時市場數據摘要作為 AI 背景知識
+            market_latest_lines = []
+            for col_name in market_df.columns:
+                s = market_df[col_name].dropna()
+                if not s.empty:
+                    market_latest_lines.append(f"- {col_name}: {s.iloc[-1]:.2f}")
+            market_snapshot = (
+                f"- 美國 CPI 年增率: {latest_cpi:.2f}%\n"
+                f"- 美國失業率: {latest_unemp:.1f}%\n"
+                f"- 美國聯邦基金利率: {latest_fed:.2f}%\n"
+                f"- 美國 10年期公債殖利率: {latest_us10:.2f}%\n"
+                f"- 10Y-2Y 美債利差: {latest_spread:.2f}%\n"
+                + "\n".join(market_latest_lines)
+            )
+
+            if "chat_history" not in st.session_state:
+                st.session_state["chat_history"] = [
+                    {
+                        "role": "assistant",
+                        "content": "你好！我已讀取目前儀表板上的最新美債殖利率、CPI、失業率以及台美股、黃金、原油與匯率數據。你想深入探討哪一部分的市場連動或風險評估？",
+                    }
+                ]
+
+            # 快捷提問按鈕與清除對話按鈕
+            q_col1, q_col2, q_col3, q_col4 = st.columns([1.2, 1.2, 1.2, 0.7])
+            quick_prompt = None
+            with q_col1:
+                if st.button("💡 解讀目前利差與衰退風險", use_container_width=True):
+                    quick_prompt = "請根據目前儀表板的 10Y-2Y 美債利差、CPI 與失業率數據，評估美國經濟目前處於哪個景氣週期階段？"
+            with q_col2:
+                if st.button("🪙 黃金與美元/台幣走勢分析", use_container_width=True):
+                    quick_prompt = "結合目前的美債殖利率、黃金價格與美元/台幣匯率水準，分析目前的資金避險情緒與匯率壓力。"
+            with q_col3:
+                if st.button("📈 美股與台股近期連動評估", use_container_width=True):
+                    quick_prompt = "從目前的 S&P 500、台灣加權指數與聯準會利率環境來看，台美股市目前面臨哪些主要總經順風或逆風？"
+            with q_col4:
+                if st.button("🗑️ 清除對話", use_container_width=True):
+                    st.session_state["chat_history"] = []
+                    st.rerun()
+
+            # 顯示歷史對話訊息
+            chat_container = st.container(height=420)
+            with chat_container:
+                for msg in st.session_state["chat_history"]:
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"])
+
+            # 接收使用者輸入或快捷按鈕問題
+            user_input = st.chat_input("輸入你想詢問的總經或市場問題（例如：聯準會若維持高利率對黃金有何影響？）...")
+            final_question = quick_prompt if quick_prompt else user_input
+
+            if final_question:
+                st.session_state["chat_history"].append({"role": "user", "content": final_question})
+                with chat_container:
+                    with st.chat_message("user"):
+                        st.markdown(final_question)
+                    with st.chat_message("assistant"):
+                        with st.spinner("AI 分析師正在結合即時數據思考中..."):
+                            try:
+                                reply = chat_with_macro_assistant(
+                                    gemini_api_key,
+                                    st.session_state["chat_history"],
+                                    final_question,
+                                    market_snapshot,
+                                )
+                                st.markdown(reply)
+                                st.session_state["chat_history"].append({"role": "assistant", "content": reply})
+                            except Exception as chat_err:
+                                st.error(f"回覆時發生錯誤: {chat_err}")
 
     # 第三區塊：AI 總經指標短評
     st.write("---")
