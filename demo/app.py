@@ -1,56 +1,76 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import yfinance as yf
 from fredapi import Fred
 import feedparser
-import google.generativeai as genai
-from urllib.parse import quote  # 解決 URL 空白字元轉碼問題
+import requests
+import time
+from urllib.parse import quote
+from google import genai
+from google.genai.errors import APIError
 
 # ==========================================
-# 1. 頁面配置與側邊欄金鑰設定
+# 1. 頁面基本配置與側邊欄設定
 # ==========================================
-st.set_page_config(page_title="總體經濟、金融與 NLP 市場情緒儀表板", layout="wide")
-st.title("🌐 總體經濟、金融指標與 AI 輿論情緒即時儀表板")
+st.set_page_config(page_title="全球總體經濟、金融與 AI 情緒儀表板", layout="wide")
+st.title("🌐 全球總體經濟、金融指標與 AI 輿論情緒即時儀表板")
 
 st.sidebar.header("⚙️ 設定與金鑰")
 
-# 1.1 檢查 FRED API Key
+# 1.1 FRED API Key
 if "FRED_API_KEY" in st.secrets:
     fred_key = st.secrets["FRED_API_KEY"]
     st.sidebar.success("已自動讀取 FRED API Key！")
 else:
-    fred_key = st.sidebar.text_input("請輸入 FRED API Key:", type="password")
+    fred_key = st.sidebar.text_input("請輸入你的 FRED API Key:", type="password")
 
-# 1.2 檢查 Gemini API Key (NLP 情緒分析用)
-gemini_key = None
+# 1.2 Gemini API Key
 if "GEMINI_API_KEY" in st.secrets:
     gemini_key = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=gemini_key)
     st.sidebar.success("已自動讀取 Gemini API Key！")
 else:
-    gemini_input = st.sidebar.text_input("請輸入 Gemini API Key (情緒分析用):", type="password")
-    if gemini_input:
-        gemini_key = gemini_input
-        genai.configure(api_key=gemini_key)
+    gemini_key = st.sidebar.text_input("請輸入你的 Gemini API Key:", type="password")
 
-if st.sidebar.button("手動刷新數據"):
+if st.sidebar.button("🔄 手動刷新所有數據"):
     st.cache_data.clear()
+    st.rerun()
 
 # ==========================================
-# 2. 數據抓取函式 (FRED, yfinance, RSS 新聞)
+# 2. 數據抓取函式 (FRED, yfinance, Google News RSS)
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_fred_data(api_key):
     fred = Fred(api_key=api_key)
-    data = {
-        "CPI 物價指數": fred.get_series("CPIAUCSL"),
-        "10年期美債殖利率": fred.get_series("DGS10"),
-        "美國失業率": fred.get_series("UNRATE"),
-        "聯邦基金利率": fred.get_series("FEDFUNDS")
+    
+    # 抓取原始指標並去除空值
+    cpi = fred.get_series("CPIAUCSL").dropna()
+    dgs10 = fred.get_series("DGS10").dropna()
+    dgs2 = fred.get_series("DGS2").dropna()               # 2 年期美債殖利率
+    unrate = fred.get_series("UNRATE").dropna()
+    fedfunds = fred.get_series("FEDFUNDS").dropna()
+    jgb10 = fred.get_series("IRLTLT01JPM156N").dropna()   # 日本 10 年期公債殖利率
+    
+    # 計算衍生指標（保留原始頻率，避免 ffill 稀釋變化量）
+    cpi_yoy = (cpi.pct_change(12) * 100).dropna()
+    yield_spread = (dgs10 - dgs2).dropna()
+    
+    raw_series = {
+        "CPI 物價指數": cpi,
+        "CPI 年增率 (%)": cpi_yoy,
+        "美國10年期美債殖利率 (%)": dgs10,
+        "美國2年期美債殖利率 (%)": dgs2,
+        "10Y-2Y美債利差 (%)": yield_spread,
+        "日本10年期國債殖利率 (%)": jgb10,
+        "美國失業率 (%)": unrate,
+        "聯邦基金利率 (%)": fedfunds
     }
-    df = pd.DataFrame(data).ffill().tail(365)
-    return df
+    
+    # 合併時間序列供圖表繪製（保留近兩年）
+    df = pd.DataFrame(raw_series).sort_index()
+    df = df.ffill().dropna(how="all").tail(730)
+    return df, raw_series
 
 @st.cache_data(ttl=600)
 def get_market_data():
@@ -58,109 +78,71 @@ def get_market_data():
         "S&P 500": "^GSPC",
         "台灣加權指數": "^TWII",
         "布蘭特原油": "BZ=F",
+        "黃金期貨/現貨 (USD/oz)": "GC=F",
         "美元/台幣匯率": "TWD=X"
     }
-    df = yf.download(list(tickers.values()), period="1y")["Close"]
+    raw_df = yf.download(list(tickers.values()), period="1y", progress=False)
+    df = raw_df["Close"].copy() if "Close" in raw_df.columns else raw_df.copy()
     df.rename(columns={v: k for k, v in tickers.items()}, inplace=True)
-    return df
+    # 填補跨國市場休市日落差，避免折線圖斷裂
+    return df.dropna(how="all").ffill()
 
 @st.cache_data(ttl=1800)
 def fetch_google_news(keyword="Federal Reserve Inflation"):
-    # 使用 quote 轉碼，確保包含空白或特殊字元之關鍵字連線成功
     safe_keyword = quote(keyword)
-    url = f"https://news.google.com/rss/search?q={safe_keyword}&hl=en-US"
-    feed = feedparser.parse(url)
-    return [entry.title for entry in feed.entries[:8]]
-
-# ==========================================
-# 3. 頁面渲染邏輯
-# ==========================================
-if fred_key:
+    url = f"https://news.google.com/rss/search?q={safe_keyword}&hl=en-US&gl=US&ceid=US:en"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        macro_df = get_fred_data(fred_key)
-        market_df = get_market_data()
+        resp = requests.get(url, headers=headers, timeout=10)
+        feed = feedparser.parse(resp.content)
+        return [
+            {
+                "title": entry.title,
+                "link": entry.link,
+                "published": entry.get("published", "")
+            }
+            for entry in feed.entries[:8]
+        ]
+    except Exception:
+        return []
 
-        # 第一區塊：核心總經 KPI 卡片
-        st.subheader("📊 關鍵總體經濟指標 (FRED)")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        latest_cpi = macro_df["CPI 物價指數"].dropna().iloc[-1]
-        col1.metric("CPI 物價指數", f"{latest_cpi:.1f}")
-        
-        latest_rate = macro_df["10年期美債殖利率"].dropna().iloc[-1]
-        rate_prev = macro_df["10年期美債殖利率"].dropna().iloc[-2]
-        col2.metric("10年美債殖利率", f"{latest_rate:.2f}%", f"{latest_rate - rate_prev:+.2f}%")
-        
-        latest_unemp = macro_df["美國失業率"].dropna().iloc[-1]
-        col3.metric("美國失業率", f"{latest_unemp:.1f}%")
-        
-        latest_fed = macro_df["聯邦基金利率"].dropna().iloc[-1]
-        col4.metric("聯邦基金利率", f"{latest_fed:.2f}%")
+# ==========================================
+# 3. Gemini AI 呼叫核心（含容錯重試機制）
+# ==========================================
+def call_gemini_with_retry(api_key, prompt):
+    client = genai.Client(api_key=api_key)
+    models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    last_error = None
 
-        st.write("---")
+    for model_name in models_to_try:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+                return response.text
+            except APIError as e:
+                last_error = e
+                if e.code == 404:
+                    break
+                if e.code == 503:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                raise e
+            except Exception as e:
+                last_error = e
+                time.sleep(1)
+                continue
 
-        # 第二區塊：分頁儀表板
-        tab1, tab2, tab3 = st.tabs([
-            "📈 金融市場走勢 (yfinance)", 
-            "🏛️ 總體經濟趨勢 (FRED)", 
-            "📰 NLP 市場新聞與鷹鴿情緒分析"
-        ])
-        
-        # 頁籤 1: 金融市場
-        with tab1:
-            market_choice = st.selectbox("選擇金融市場標的：", market_df.columns)
-            fig1 = px.line(market_df, y=market_choice, title=f"{market_choice} 近一年走勢")
-            st.plotly_chart(fig1, use_container_width=True)
-            
-        # 頁籤 2: 總體經濟
-        with tab2:
-            macro_choice = st.selectbox("選擇總體經濟指標：", macro_df.columns)
-            fig2 = px.line(macro_df, y=macro_choice, title=f"{macro_choice} 近一年走勢")
-            st.plotly_chart(fig2, use_container_width=True)
+    raise last_error
 
-        # 頁籤 3: NLP 市場新聞與情緒分析
-        with tab3:
-            st.subheader("📰 即時財經新聞與 LLM 鷹鴿派情緒分析")
-            
-            search_kw = st.text_input("🔍 輸入新聞關鍵字 (預設: Federal Reserve Inflation):", value="Federal Reserve Inflation")
-            news_titles = fetch_google_news(search_kw)
+def generate_macro_summary(api_key, cpi_val, unemp_val, fed_val, spread_val, gold_val):
+    prompt = f"""
+你是一位專業總體經濟與金融市場分析師。請根據以下最新公布之核心指標數據，產出一份約 200 字以內的精練總體經濟短評，重點剖析當前通膨壓力、聯準會貨幣政策路徑，以及市場衰退風險（利差信號）：
 
-            nlp_col1, nlp_col2 = st.columns([1, 1])
-
-            with nlp_col1:
-                st.markdown("### 📌 最新財經新聞標題 (RSS)")
-                if news_titles:
-                    for i, title in enumerate(news_titles, 1):
-                        st.write(f"**{i}.** {title}")
-                else:
-                    st.warning("查無相關新聞標題，請嘗試更換關鍵字。")
-
-            with nlp_col2:
-                st.markdown("### 🤖 Gemini AI 鷹鴿派與情緒打分")
-                if gemini_key:
-                    if st.button("🚀 開始分析新聞市場情緒", type="primary"):
-                        if news_titles:
-                            with st.spinner("Gemini 正在剖析文本立場與鷹鴿情緒中..."):
-                                try:
-                                    news_text = "\n".join([f"- {t}" for t in news_titles])
-                                    prompt = f"你是一位專業總體經濟分析師。請分析以下 8 條新聞標題：\n{news_text}\n\n" \
-                                             f"請以繁體中文輸出結構化報告：\n" \
-                                             f"1. 整體市場情緒分數 (0~100)\n" \
-                                             f"2. 貨幣政策立場判定 (鷹派/鴿派/中立)\n" \
-                                             f"3. 重點分析與逐條評分表格 (Markdown Format)"
-                                    
-                                    # 使用最新 Gemini 3.5 Flash 模型
-                                    model = genai.GenerativeModel("gemini-3.5-flash")
-                                    response = model.generate_content(prompt)
-                                    st.markdown(response.text)
-                                except Exception as e:
-                                    st.error(f"AI 分析時發生錯誤: {e}")
-                        else:
-                            st.warning("尚無新聞數據可供分析。")
-                else:
-                    st.warning("👈 請在側邊欄輸入 Gemini API Key（或設定在 Secrets 中）以啟用 AI 文本情緒分析功能。")
-
-    except Exception as e:
-        st.error(f"數據讀取失敗，請確認 FRED API Key 是否正確。錯誤訊息: {e}")
-else:
-    st.info("👈 請在左側輸入您的 FRED API Key 以開啟儀表板。")
+【最新指標數據】
+- 美國 CPI 年增率：{cpi_val:.2f}%
+- 美國失業率：{unemp_val:.1f}%
+- 美國聯邦基金利率：{fed_val:.2f}%
+- 10Y-2Y 美債殖利率利差：{spread_val:.2f}%（{'殖利率倒掛中' if spread_val < 0 else '利差
