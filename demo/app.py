@@ -208,7 +208,7 @@ def generate_macro_summary(api_key, cpi_val, unemp_val, fed_val, spread_val, gol
         f"- 美國失業率：{unemp_val:.1f}%\n"
         f"- 美國聯邦基金利率：{fed_val:.2f}%\n"
         f"- 10Y-2Y 美債殖利率利差：{spread_val:.2f}%（{spread_status}）\n"
-        f"- 黃金現貨價格：\${gold_val:.1f} 美元/盎司\n\n"
+        f"- 黃金現貨價格：${gold_val:.1f} 美元/盎司\n\n"
         "請以繁體中文撰寫，言簡意賅、切中要點。"
     )
     return call_gemini_with_retry(api_key, prompt)
@@ -358,7 +358,7 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
     )
     latest_gold = gold_series.iloc[-1] if not gold_series.empty else 0.0
     if len(gold_series) >= 2:
-        col5.metric("黃金價格 (oz)", f"\${latest_gold:.1f}", f"{latest_gold - gold_series.iloc[-2]:+.1f} USD")
+        col5.metric("黃金價格 (oz)", f"${latest_gold:.1f}", f"{latest_gold - gold_series.iloc[-2]:+.1f} USD")
 
     fed_series = raw_series["聯邦基金利率 (%)"]
     latest_fed = fed_series.iloc[-1] if not fed_series.empty else 0.0
@@ -438,4 +438,192 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
     # Tab 4：升級版 NLP 視覺化與互動介面
     # ==========================================
     with tab4:
-        st.markdown("#### 📰 即時財經新聞與 LLM
+        st.markdown("#### 📰 即時財經新聞與 LLM 鷹鴿派情緒分析")
+
+        # 互動搜尋列：支援快速主題標籤 + 自訂關鍵字 + 篇數選擇
+        quick_topics = {
+            "自訂關鍵字": None,
+            "🇺🇸 聯準會與通膨": "Federal Reserve Inflation",
+            "💹 美債殖利率與降息": "US Treasury Yield Rate Cut",
+            "🛢️ 原油與地緣政治": "Crude Oil Geopolitics Economy",
+            "🇹🇼 台灣半導體與股市": "Taiwan Semiconductor Stock Market",
+            "🥇 黃金避險與美元": "Gold Price US Dollar Safe Haven",
+        }
+        ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1.2, 2, 0.8])
+        with ctrl_col1:
+            topic_preset = st.selectbox("⚡ 快速主題選擇：", list(quick_topics.keys()), index=1)
+        with ctrl_col2:
+            default_kw = quick_topics[topic_preset] if quick_topics[topic_preset] else "Federal Reserve Inflation"
+            search_kw = st.text_input("🔍 輸入新聞關鍵字：", value=default_kw)
+        with ctrl_col3:
+            news_limit = st.slider("抓取新聞則數：", min_value=5, max_value=15, value=8)
+
+        news_items = fetch_google_news(search_kw, limit=news_limit)
+
+        # 執行 AI 分析按鈕
+        action_col1, action_col2 = st.columns([1, 3])
+        with action_col1:
+            analyze_clicked = st.button("🚀 開始 AI 情緒視覺化分析", type="primary", use_container_width=True)
+        with action_col2:
+            if not gemini_api_key:
+                st.warning("👈 請在側邊欄輸入 Gemini API Key 以啟用 AI 視覺化情緒分析功能。")
+
+        if analyze_clicked and gemini_api_key:
+            if news_items:
+                with st.spinner("Gemini 正在量化新聞情緒分數與鷹鴿政策傾向..."):
+                    try:
+                        st.session_state["news_analysis_data"] = analyze_news_sentiment_structured(
+                            gemini_api_key, news_items
+                        )
+                        st.session_state["news_analyzed_kw"] = search_kw
+                    except Exception as ai_err:
+                        st.error(f"AI 分析時發生錯誤: {ai_err}")
+            else:
+                st.warning("尚無新聞數據可供分析，請更換關鍵字。")
+
+        # 顯示視覺化儀表板（若已完成分析）
+        if "news_analysis_data" in st.session_state and st.session_state["news_analysis_data"]:
+            report_data = st.session_state["news_analysis_data"]
+            items_list = report_data.get("items", [])
+            df_items = pd.DataFrame(items_list)
+
+            st.write("---")
+            st.markdown(f"##### 📊 AI 情緒與貨幣政策總覽（分析關鍵字：`{st.session_state.get('news_analyzed_kw', search_kw)}`）")
+
+            # 第一層視覺化：情緒儀表盤 + 政策立場判定卡片 + 鷹鴿佔比甜甜圈圖
+            vis_col1, vis_col2, vis_col3 = st.columns([1.1, 1.2, 1])
+
+            with vis_col1:
+                st.plotly_chart(
+                    render_sentiment_gauge(report_data.get("overall_score", 50)),
+                    use_container_width=True,
+                )
+
+            with vis_col2:
+                overall_stance = report_data.get("overall_stance", "中立")
+                stance_badge = {
+                    "鷹派": "🦅 **鷹派 (Hawkish)** — 傾向緊縮／維持高利率",
+                    "鴿派": "🕊️ **鴿派 (Dovish)** — 傾向寬鬆／釋放降息訊號",
+                    "中立": "⚖️ **中立 (Neutral)** — 觀望經濟數據與政策平衡",
+                }.get(overall_stance, f"📌 **{overall_stance}**")
+
+                st.markdown("###### 🏛️ 整體貨幣政策立場判定")
+                if overall_stance == "鷹派":
+                    st.error(stance_badge)
+                elif overall_stance == "鴿派":
+                    st.success(stance_badge)
+                else:
+                    st.info(stance_badge)
+
+                st.markdown(f"**核心判讀理由：**\n{report_data.get('stance_reason', '')}")
+
+            with vis_col3:
+                if not df_items.empty:
+                    st.plotly_chart(render_stance_donut(df_items), use_container_width=True)
+
+            # 第二層視覺化：互動篩選器 + 單則新聞情緒橫條圖
+            if not df_items.empty:
+                st.write("---")
+                st.markdown("##### 🎛️ 互動式新聞篩選與單篇情緒排行")
+
+                filter_col1, filter_col2 = st.columns([1, 1])
+                with filter_col1:
+                    selected_stances = st.multiselect(
+                        "篩選政策立場：",
+                        options=["鷹派", "鴿派", "中立"],
+                        default=["鷹派", "鴿派", "中立"],
+                    )
+                with filter_col2:
+                    score_range = st.slider(
+                        "篩選情緒分數區間：",
+                        min_value=0,
+                        max_value=100,
+                        value=(0, 100),
+                    )
+
+                filtered_df = df_items[
+                    (df_items["stance"].isin(selected_stances))
+                    & (df_items["sentiment_score"] >= score_range[0])
+                    & (df_items["sentiment_score"] <= score_range[1])
+                ]
+
+                if not filtered_df.empty:
+                    st.plotly_chart(render_news_score_bar(filtered_df), use_container_width=True)
+
+                    # 第三層：可展開的新聞深度卡片 + 完整結構化表格
+                    sub_tab_cards, sub_tab_table = st.tabs(["🗂️ 互動新聞解析卡片", "📋 完整逐條評分表格"])
+
+                    with sub_tab_cards:
+                        for _, row in filtered_df.iterrows():
+                            stance_icon = {"鷹派": "🦅", "鴿派": "🕊️", "中立": "⚖️"}.get(row["stance"], "📰")
+                            header_title = (
+                                f"{stance_icon} [分數: {row['sentiment_score']} | {row['stance']}] "
+                                f"#{row['index']} {row['short_title']}"
+                            )
+                            with st.expander(header_title, expanded=False):
+                                st.markdown(f"**原文標題：** [{row.get('original_title', row['short_title'])}]({row.get('link', '#')})")
+                                if row.get("published"):
+                                    st.caption(f"發布時間：{row['published']}")
+                                st.markdown(f"**AI 市場情緒影響解析：** {row['impact_summary']}")
+
+                    with sub_tab_table:
+                        display_df = filtered_df[["index", "short_title", "stance", "sentiment_score", "impact_summary"]].rename(
+                            columns={
+                                "index": "編號",
+                                "short_title": "新聞摘要",
+                                "stance": "鷹鴿傾向",
+                                "sentiment_score": "情緒分數",
+                                "impact_summary": "情緒影響",
+                            }
+                        )
+                        st.dataframe(display_df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("目前篩選條件下無符合的新聞，請放寬立場或分數區間。")
+
+        # 原始新聞清單（未點擊 AI 分析前也會即時顯示，方便直接閱讀）
+        st.write("---")
+        with st.expander("📌 檢視最新抓取之原始財經新聞標題 (Google News RSS)", expanded=("news_analysis_data" not in st.session_state)):
+            if news_items:
+                for i, item in enumerate(news_items, 1):
+                    pub_str = f" — *{item['published']}*" if item["published"] else ""
+                    st.markdown(f"**{i}.** [{item['title']}]({item['link']}){pub_str}")
+            else:
+                st.warning("查無相關新聞標題，請嘗試更換關鍵字。")
+
+    # 第三區塊：AI 總經指標短評
+    st.write("---")
+    st.subheader("🤖 AI 總體經濟指標即時解讀")
+
+    if st.button("✨ 產生 AI 總體經濟摘要", type="primary"):
+        if not gemini_api_key:
+            st.warning("⚠️ 請先在側邊欄填入 Gemini API Key（或於 Secrets 配置 GEMINI_API_KEY）以啟用 AI 摘要功能。")
+        else:
+            with st.spinner("AI 正在分析最新總經指標並撰寫短評..."):
+                try:
+                    st.session_state["macro_summary"] = generate_macro_summary(
+                        api_key=gemini_api_key,
+                        cpi_val=latest_cpi,
+                        unemp_val=latest_unemp,
+                        fed_val=latest_fed,
+                        spread_val=latest_spread,
+                        gold_val=latest_gold,
+                    )
+                except Exception as ai_err:
+                    st.error(f"調用 Gemini API 時發生錯誤: {ai_err}")
+
+    if "macro_summary" in st.session_state:
+        st.markdown(f"> **📌 AI 總經短評：**  \n> {st.session_state['macro_summary']}")
+
+
+# ==========================================
+# 7. 主程式進入點
+# ==========================================
+if fred_key:
+    try:
+        macro_data, raw_data = get_fred_data(fred_key)
+        market_data = get_market_data()
+        render_dashboard(macro_data, raw_data, market_data, gemini_key)
+    except Exception as e:
+        st.error(f"數據讀取失敗，請確認 FRED API Key 是否正確。錯誤訊息: {e}")
+else:
+    st.info("👈 請在左側輸入您的 FRED API Key 以開啟儀表板。")
