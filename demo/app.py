@@ -35,6 +35,7 @@ if st.sidebar.button("🔄 手動刷新所有數據"):
     st.cache_data.clear()
     st.rerun()
 
+
 # ==========================================
 # 2. 數據抓取函式
 # ==========================================
@@ -103,11 +104,15 @@ def fetch_google_news(keyword="Federal Reserve Inflation"):
 
 
 # ==========================================
-# 3. Gemini AI 呼叫核心
+# 3. Gemini AI 呼叫核心（支援 3.5 系列與自動備援）
 # ==========================================
 def call_gemini_with_retry(api_key, prompt):
     client = genai.Client(api_key=api_key)
-    models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    models_to_try = [
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3-flash-preview",
+    ]
     last_error = None
 
     for model_name in models_to_try:
@@ -130,6 +135,19 @@ def call_gemini_with_retry(api_key, prompt):
                 last_error = e
                 time.sleep(1)
                 continue
+
+    # 最後備援：自動從當前 API Key 可用模型中挑選 Flash 模型
+    try:
+        for m in client.models.list():
+            actions = getattr(m, "supported_actions", None) or []
+            if "flash" in m.name.lower() and "generateContent" in actions:
+                response = client.models.generate_content(
+                    model=m.name,
+                    contents=prompt,
+                )
+                return response.text
+    except Exception:
+        pass
 
     raise last_error
 
@@ -338,4 +356,4 @@ if fred_key:
     except Exception as e:
         st.error(f"數據讀取失敗，請確認 FRED API Key 是否正確。錯誤訊息: {e}")
 else:
-    st.info("👈 請在左側輸入您的 FRED API Key 以開啟儀表板。")
+    st.info("👈 請在左側輸入您的 FRED API Key 以開啟儀表板。")*
