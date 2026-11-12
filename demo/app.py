@@ -138,6 +138,7 @@ def call_gemini_with_retry(api_key, prompt):
     raise last_error
 
 def generate_macro_summary(api_key, cpi_val, unemp_val, fed_val, spread_val, gold_val):
+    spread_status = "殖利率倒掛中" if spread_val < 0 else "利差正常"
     prompt = f"""
 你是一位專業總體經濟與金融市場分析師。請根據以下最新公布之核心指標數據，產出一份約 200 字以內的精練總體經濟短評，重點剖析當前通膨壓力、聯準會貨幣政策路徑，以及市場衰退風險（利差信號）：
 
@@ -145,4 +146,30 @@ def generate_macro_summary(api_key, cpi_val, unemp_val, fed_val, spread_val, gol
 - 美國 CPI 年增率：{cpi_val:.2f}%
 - 美國失業率：{unemp_val:.1f}%
 - 美國聯邦基金利率：{fed_val:.2f}%
-- 10Y-2Y 美債殖利率利差：{spread_val:.2f}%（{'殖利率倒掛中' if spread_val < 0 else '利差
+- 10Y-2Y 美債殖利率利差：{spread_val:.2f}%（{spread_status}）
+- 黃金現貨價格：\${gold_val:.1f} 美元/盎司
+
+請以繁體中文撰寫，言簡意賅、切中要點。
+"""
+    return call_gemini_with_retry(api_key, prompt)
+
+def analyze_news_sentiment(api_key, news_items):
+    news_text = "\n".join([f"- {item['title']} ({item['published']})" for item in news_items])
+    prompt = f"""你是一位專業總體經濟分析師。請分析以下 {len(news_items)} 條最新財經新聞標題：
+{news_text}
+
+請以繁體中文輸出結構化報告：
+1. **整體市場情緒分數 (0~100)**（0 為極度恐慌/悲觀，50 為中性，100 為極度樂觀）
+2. **貨幣政策立場判定**（鷹派 / 鴿派 / 中立，並簡述理由）
+3. **重點分析與逐條評分表格**（以 Markdown 表格呈現：新聞摘要、鷹鴿傾向、情緒影響）"""
+    return call_gemini_with_retry(api_key, prompt)
+
+# ==========================================
+# 4. 頁面主體渲染
+# ==========================================
+if fred_key:
+    try:
+        macro_df, raw_series = get_fred_data(fred_key)
+        market_df = get_market_data()
+
+        # 第一區塊：核心 KPI 卡片
