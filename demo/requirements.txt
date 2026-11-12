@@ -1,6 +1,7 @@
 streamlit
 pandas
 plotly
-fredapi
 yfinance
-google-genai
+fredapi
+feedparser
+google-generativeai
