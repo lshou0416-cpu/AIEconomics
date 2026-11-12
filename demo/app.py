@@ -142,14 +142,15 @@ def fetch_google_news(keyword="Federal Reserve Inflation", limit=8):
 
 
 # ==========================================
-# 4. Gemini AI 呼叫核心（支援純文字與結構化 JSON）
+# 4. Gemini AI 呼叫核心（v1beta + 強化版自動備援）
 # ==========================================
 def call_gemini_with_retry(api_key, prompt, response_schema=None):
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
+
     models_to_try = [
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite",
-        "gemini-3-flash-preview",
+        "gemini-2.0-flash",
     ]
     last_error = None
 
@@ -183,15 +184,26 @@ def call_gemini_with_retry(api_key, prompt, response_schema=None):
                 time.sleep(1)
                 continue
 
+    # 最後備援：直接從你的 API Key 可用模型清單中抓支援的 flash 模型
     try:
-        for m in client.models.list():
-            if "flash" in m.name.lower() and "generateContent" in (m.supported_actions or []):
+        available_models = [
+            m.name for m in client.models.list()
+            if "flash" in m.name.lower()
+            and "tts" not in m.name.lower()
+            and "image" not in m.name.lower()
+            and "lite" not in m.name.lower()
+        ]
+        for candidate in available_models:
+            try:
                 response = client.models.generate_content(
-                    model=m.name,
+                    model=candidate,
                     contents=prompt,
                     config=config,
                 )
                 return response.text
+            except Exception as inner_e:
+                last_error = inner_e
+                continue
     except Exception:
         pass
 
@@ -229,7 +241,6 @@ def analyze_news_sentiment_structured(api_key, news_items):
     )
     raw_json = call_gemini_with_retry(api_key, prompt, response_schema=MarketSentimentReport)
     parsed = json.loads(raw_json)
-    # 將原始新聞連結與發布時間併入結構中
     for item_obj in parsed.get("items", []):
         idx = item_obj.get("index", 1) - 1
         if 0 <= idx < len(news_items):
@@ -440,7 +451,6 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
     with tab4:
         st.markdown("#### 📰 即時財經新聞與 LLM 鷹鴿派情緒分析")
 
-        # 互動搜尋列：支援快速主題標籤 + 自訂關鍵字 + 篇數選擇
         quick_topics = {
             "自訂關鍵字": None,
             "🇺🇸 聯準會與通膨": "Federal Reserve Inflation",
@@ -460,7 +470,6 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
 
         news_items = fetch_google_news(search_kw, limit=news_limit)
 
-        # 執行 AI 分析按鈕
         action_col1, action_col2 = st.columns([1, 3])
         with action_col1:
             analyze_clicked = st.button("🚀 開始 AI 情緒視覺化分析", type="primary", use_container_width=True)
@@ -481,7 +490,6 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
             else:
                 st.warning("尚無新聞數據可供分析，請更換關鍵字。")
 
-        # 顯示視覺化儀表板（若已完成分析）
         if "news_analysis_data" in st.session_state and st.session_state["news_analysis_data"]:
             report_data = st.session_state["news_analysis_data"]
             items_list = report_data.get("items", [])
@@ -490,7 +498,6 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
             st.write("---")
             st.markdown(f"##### 📊 AI 情緒與貨幣政策總覽（分析關鍵字：`{st.session_state.get('news_analyzed_kw', search_kw)}`）")
 
-            # 第一層視覺化：情緒儀表盤 + 政策立場判定卡片 + 鷹鴿佔比甜甜圈圖
             vis_col1, vis_col2, vis_col3 = st.columns([1.1, 1.2, 1])
 
             with vis_col1:
@@ -521,7 +528,6 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
                 if not df_items.empty:
                     st.plotly_chart(render_stance_donut(df_items), use_container_width=True)
 
-            # 第二層視覺化：互動篩選器 + 單則新聞情緒橫條圖
             if not df_items.empty:
                 st.write("---")
                 st.markdown("##### 🎛️ 互動式新聞篩選與單篇情緒排行")
@@ -550,7 +556,6 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
                 if not filtered_df.empty:
                     st.plotly_chart(render_news_score_bar(filtered_df), use_container_width=True)
 
-                    # 第三層：可展開的新聞深度卡片 + 完整結構化表格
                     sub_tab_cards, sub_tab_table = st.tabs(["🗂️ 互動新聞解析卡片", "📋 完整逐條評分表格"])
 
                     with sub_tab_cards:
@@ -580,7 +585,6 @@ def render_dashboard(macro_df, raw_series, market_df, gemini_api_key):
                 else:
                     st.info("目前篩選條件下無符合的新聞，請放寬立場或分數區間。")
 
-        # 原始新聞清單（未點擊 AI 分析前也會即時顯示，方便直接閱讀）
         st.write("---")
         with st.expander("📌 檢視最新抓取之原始財經新聞標題 (Google News RSS)", expanded=("news_analysis_data" not in st.session_state)):
             if news_items:
